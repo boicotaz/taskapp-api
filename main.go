@@ -13,41 +13,81 @@ import (
 
 var db *sql.DB
 
+// Task represents a row in the tasks table
+type Task struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
 func tasksHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT title, description, status FROM tasks")
+	switch r.Method {
+	case http.MethodGet:
+		handleGetTasks(w, r)
+	case http.MethodPut:
+		handleUpdateTask(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleGetTasks(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT id, title, description, status FROM tasks")
 	if err != nil {
-		http.Error(w, "Failed to query tasks", http.StatusInternalServerError)
-		log.Println("Query error:", err)
+		http.Error(w, "failed to query tasks", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
-	tasks := []map[string]interface{}{}
+	var tasks []Task
 	for rows.Next() {
-		var title, description, status string
-		if err := rows.Scan(&title, &description, &status); err != nil {
-			http.Error(w, "Failed to scan task", http.StatusInternalServerError)
-			log.Println("Scan error:", err)
+		var t Task
+		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status); err != nil {
+			http.Error(w, "failed to scan task", http.StatusInternalServerError)
 			return
 		}
-		tasks = append(tasks, map[string]interface{}{
-			"title":       title,
-			"description": description,
-			"status":      status,
-		})
-	}
-
-	if err := rows.Err(); err != nil {
-		http.Error(w, "Error iterating rows", http.StatusInternalServerError)
-		log.Println("Rows iteration error:", err)
-		return
+		tasks = append(tasks, t)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(tasks); err != nil {
-		http.Error(w, "Failed to encode tasks", http.StatusInternalServerError)
-		log.Println("JSON encoding error:", err)
+	json.NewEncoder(w).Encode(tasks)
+}
+
+func handleUpdateTask(w http.ResponseWriter, r *http.Request) {
+	var t Task
+
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
 	}
+
+	if t.ID == 0 {
+		http.Error(w, "task id is required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := db.Exec(`
+		UPDATE tasks
+		SET title = $1,
+		    description = $2,
+		    status = $3
+		WHERE id = $4
+	`, t.Title, t.Description, t.Status, t.ID)
+
+	if err != nil {
+		http.Error(w, "Failed to update task", http.StatusInternalServerError)
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("task updated"))
 }
 
 // Readiness: checks DB connectivity.

@@ -27,6 +27,8 @@ func tasksHandler(w http.ResponseWriter, r *http.Request) {
 		handleGetTasks(w, r)
 	case http.MethodPut:
 		handleUpdateTask(w, r)
+	case http.MethodPost:
+		handleCreateTask(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -88,6 +90,42 @@ func handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("task updated"))
+}
+
+
+func handleCreateTask(w http.ResponseWriter, r *http.Request) {
+	var t Task
+
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// Basic validation
+	if t.Title == "" {
+		http.Error(w, "title is required", http.StatusBadRequest)
+		return
+	}
+
+	// Optional default
+	if t.Status == "" {
+		t.Status = "todo"
+	}
+
+	err := db.QueryRow(`
+		INSERT INTO tasks (title, description, status)
+		VALUES ($1, $2, $3)
+		RETURNING id
+	`, t.Title, t.Description, t.Status).Scan(&t.ID)
+
+	if err != nil {
+		http.Error(w, "Failed to create task", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(t)
 }
 
 // Readiness: checks DB connectivity.

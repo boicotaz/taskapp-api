@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -21,17 +22,19 @@ type Task struct {
 	Status      string `json:"status"`
 }
 
-func tasksHandler(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		handleGetTasks(w, r)
-	case http.MethodPut:
-		handleUpdateTask(w, r)
-	case http.MethodPost:
-		handleCreateTask(w, r)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
+func tasksHandler(queue chan Task) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        switch r.Method {
+        case http.MethodGet:
+            handleGetTasks(w, r)
+        case http.MethodPut:
+            handleUpdateTask(w, r)
+        case http.MethodPost:
+            handleCreateTask(w, r, queue)
+        default:
+            http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        }
+    }
 }
 
 func handleGetTasks(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +96,7 @@ func handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func handleCreateTask(w http.ResponseWriter, r *http.Request) {
+func handleCreateTask(w http.ResponseWriter, r *http.Request, taskQueue chan Task) {
 	var t Task
 
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
@@ -123,6 +126,9 @@ func handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 👇 async work
+	taskQueue <- t
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(t)
@@ -136,6 +142,29 @@ func readinessHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ready"))
+}
+
+func taskWorker(taskQueue chan Task) {
+	log.Println("Task worker started")
+
+	for task := range taskQueue {
+		log.Println("Processing task:", task.ID)
+
+		// mark as processing
+		if _, err := db.Exec("UPDATE tasks SET status = $1 WHERE id = $2", "processing", task.ID); err != nil {
+			log.Println("Failed to update task status:", err)
+			continue
+		}
+
+		time.Sleep(5 * time.Second) // Simulate work
+
+		if _, err := db.Exec("UPDATE tasks SET status = $1 WHERE id = $2", "done", task.ID); err != nil {
+			log.Println("Failed to update task status:", err)
+			continue
+		}
+
+		log.Println("Completed task:", task.ID)
+	}
 }
 
 func main() {
@@ -161,9 +190,15 @@ func main() {
 	}
 	log.Println("✅ Connected to Postgres")
 
+	// --- Start Task Worker ---
+	var taskQueue chan Task
+	taskQueue = make(chan Task, 100)
+
+	go taskWorker(taskQueue)
+
 	http.HandleFunc("/ready", readinessHandler)
 
-	http.HandleFunc("/tasks", tasksHandler)
+	http.HandleFunc("/tasks", tasksHandler(taskQueue))
 
 	// Read PORT from environment variable, default to 8080
 	port := os.Getenv("PORT")

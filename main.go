@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -296,8 +299,50 @@ func main() {
 		Level:     "info",
 		Timestamp: time.Now(),
 	}
-	err := http.ListenAndServe(":"+port, nil)
-	if err != nil {
-		log.Fatal(err)
+
+	// Use http.Server instead of http.ListenAndServe so we can call Shutdown()
+	// later. ListenAndServe blocks forever and has no way to stop gracefully.
+	srv := &http.Server{Addr: ":" + port}
+
+	// Start the server in a goroutine so the main goroutine is free to wait
+	// for an OS signal below.
+	go func() {
+		// ErrServerClosed is the expected return value after Shutdown() is called —
+		// it is not a real error, so we filter it out.
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("ListenAndServe error:", err)
+		}
+	}()
+
+	// Block here until Kubernetes sends SIGTERM (normal pod termination) or the
+	// developer sends SIGINT (Ctrl+C). Without this, the process would exit
+	// immediately after starting the goroutine above.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	<-quit
+
+	logQueue <- TaskEvent{
+		Action:    "server_shutting_down",
+		Level:     "info",
+		Timestamp: time.Now(),
+	}
+
+	// Shutdown() stops the server from accepting new connections and then waits
+	// for all in-flight requests to finish before returning.
+	// The context deadline is the maximum time we are willing to wait — if
+	// requests are still running after 25s we give up and force-close.
+	// 25s is chosen to stay within Kubernetes' default terminationGracePeriodSeconds
+	// of 30s, leaving a small buffer before the kubelet sends SIGKILL.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Fatal("Graceful shutdown timed out:", err)
+	}
+
+	logQueue <- TaskEvent{
+		Action:    "server_stopped",
+		Level:     "info",
+		Timestamp: time.Now(),
 	}
 }

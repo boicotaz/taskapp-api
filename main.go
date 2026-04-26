@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -23,12 +24,13 @@ func main() {
 
 	database, err := db.Connect()
 	if err != nil {
-		log.Fatal("DB connection failed:", err)
+		msg, _ := json.Marshal(model.TaskEvent{Action: "db_connection_failed", Level: "fatal", Timestamp: time.Now()})
+		log.Fatal(string(msg))
 	}
 	logQueue <- model.TaskEvent{Action: "db_connected", Level: "info", Timestamp: time.Now()}
 
 	taskQueue := make(chan model.Task, 100)
-	go worker.TaskWorker(database, taskQueue, logQueue)
+	go worker.TaskWorker(taskQueue, logQueue)
 
 	tasks := handler.NewTaskHandler(database, taskQueue, logQueue)
 	http.Handle("/tasks", tasks)
@@ -44,7 +46,8 @@ func main() {
 	srv := &http.Server{Addr: ":" + port}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal("ListenAndServe error:", err)
+			msg, _ := json.Marshal(model.TaskEvent{Action: "server_listen_failed", Level: "fatal", Timestamp: time.Now()})
+			log.Fatal(string(msg))
 		}
 	}()
 
@@ -58,7 +61,8 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Fatal("graceful shutdown timed out:", err)
+		msg, _ := json.Marshal(model.TaskEvent{Action: "shutdown_timeout", Level: "fatal", Timestamp: time.Now()})
+		log.Fatal(string(msg))
 	}
 
 	logQueue <- model.TaskEvent{Action: "server_stopped", Level: "info", Timestamp: time.Now()}

@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
 	"taskapp/backend/internal/db"
 	"taskapp/backend/internal/handler"
 	"taskapp/backend/internal/model"
@@ -28,6 +31,25 @@ func main() {
 		log.Fatal(string(msg))
 	}
 	logQueue <- model.TaskEvent{Action: "db_connected", Level: "info", Timestamp: time.Now()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if os.Getenv("SQS_ENABLED") == "true" {
+		queueURL := os.Getenv("SQS_QUEUE_URL")
+		if queueURL == "" {
+			msg, _ := json.Marshal(model.TaskEvent{Action: "sqs_queue_url_missing", Level: "fatal", Timestamp: time.Now()})
+			log.Fatal(string(msg))
+		}
+
+		cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(os.Getenv("AWS_REGION")))
+		if err != nil {
+			msg, _ := json.Marshal(model.TaskEvent{Action: "sqs_config_failed", Level: "fatal", Timestamp: time.Now()})
+			log.Fatal(string(msg))
+		}
+
+		go worker.SQSWorker(ctx, sqs.NewFromConfig(cfg), queueURL, database, logQueue)
+	}
 
 	taskQueue := make(chan model.Task, 100)
 	go worker.TaskWorker(taskQueue, logQueue)
@@ -56,9 +78,10 @@ func main() {
 	<-quit
 
 	logQueue <- model.TaskEvent{Action: "server_shutting_down", Level: "info", Timestamp: time.Now()}
+	cancel()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		msg, _ := json.Marshal(model.TaskEvent{Action: "shutdown_timeout", Level: "fatal", Timestamp: time.Now()})
